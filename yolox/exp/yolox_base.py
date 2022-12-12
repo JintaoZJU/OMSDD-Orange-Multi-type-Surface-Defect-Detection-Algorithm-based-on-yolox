@@ -18,7 +18,7 @@ class Exp(BaseExp):
 
         # ---------------- model config ---------------- #
         # detect classes number of model
-        self.num_classes = 80
+        self.num_classes = 5
         # factor of model depth
         self.depth = 1.00
         # factor of model width
@@ -30,7 +30,7 @@ class Exp(BaseExp):
         # set worker to 4 for shorter dataloader init time
         # If your training process cost many memory, reduce this value.
         self.data_num_workers = 4
-        self.input_size = (640, 640)  # (height, width)
+        self.input_size = (512, 512)  # (height, width)
         # Actual multiscale ranges: [640 - 5 * 32, 640 + 5 * 32].
         # To disable multiscale training, set the value to 0.
         self.multiscale_range = 5
@@ -43,7 +43,7 @@ class Exp(BaseExp):
         # name of annotation file for evaluation
         self.val_ann = "instances_val2017.json"
         # name of annotation file for testing
-        self.test_ann = "instances_test2017.json"
+        self.test_ann = "instances_val2017.json"
 
         # --------------- transform config ----------------- #
         # prob of applying mosaic aug
@@ -125,6 +125,7 @@ class Exp(BaseExp):
         self.model.apply(init_yolo)
         self.model.head.initialize_biases(1e-2)
         self.model.train()
+        #self.model.eval()
         return self.model
 
     def get_data_loader(self, batch_size, is_distributed, no_aug=False, cache_img=False):

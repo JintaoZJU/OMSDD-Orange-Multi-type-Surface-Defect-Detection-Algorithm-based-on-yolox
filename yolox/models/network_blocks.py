@@ -4,6 +4,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SiLU(nn.Module):
@@ -190,7 +191,7 @@ class Focus(nn.Module):
 
     def __init__(self, in_channels, out_channels, ksize=1, stride=1, act="silu"):
         super().__init__()
-        self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride, act=act)
+        self.conv = BaseConv(in_channels * 4, out_channels, ksize, stride, act=act) #copy for 4 slices
 
     def forward(self, x):
         # shape of x (b,c,w,h) -> y(b,4c,w/2,h/2)
@@ -208,3 +209,125 @@ class Focus(nn.Module):
             dim=1,
         )
         return self.conv(x)
+
+########### Attention Module ###########
+class SE(nn.Module):
+    '''Channel Attention'''
+    def __init__(self, channel, ratio=16):
+        super(SE, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel//ratio, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel//ratio, channel, bias=False),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        b, c, _, _ = x.size() #获取batchsize & channel
+        y = self.avg_pool(x).view(b, c) # 重构权重尺寸至b,c维度,此时y是二维 nn.Linear输入需要是二维张量
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+class ChannelAttention(nn.Module):
+    '''CBAM: Single Channel Dimention Max_Pool + Avg_Pool'''
+    def __init__(self, channel, ratio=8):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc1 = nn.Conv2d(channel, channel//ratio, 1, bias=False)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Conv2d(channel//ratio, channel, 1, bias=False)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc2(self.relu(self.fc1(self.avg_pool(x))))
+        max_out = self.fc2(self.relu(self.fc1(self.max_pool(x))))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    '''Spatial convolution'''
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)  #对channel维度求平均 输出维度为[b,1,h,w] 压缩成一维 最大池化同理
+        max_out, _ = torch.max(x, dim=1, keepdim=True)  #torch.max返回最大值和其索引
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x)
+
+
+class CBAM(nn.Module):
+    '''Attention composed of ChannelAttention & SpatialAttention'''
+    def __init__(self, channel, ratio=8, kernel_size=7):
+        super(CBAM, self).__init__()
+        self.channelattention = ChannelAttention(channel, ratio=ratio)
+        self.spatialattention = SpatialAttention(kernel_size=kernel_size)
+
+    def forward(self, x):
+        x = x*self.channelattention(x)
+        x = x*self.spatialattention(x)
+        return x
+
+
+# used as class:
+class Mish(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x * (torch.tanh(F.softplus(x)))
+
+
+class CAM(nn.Module):
+    '''Coordinate Attention'''
+    def __init__(self, channels, reduction=32):
+        super(CAM, self).__init__()
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        # 降维 BN+ACT
+        self.convdownsize = nn.Conv2d(channels, channels//8, 1, bias=False)
+        self.bn = nn.BatchNorm2d(channels//8)
+        self.act = SiLU()
+
+        # 升维
+        self.conv_h = nn.Conv2d(channels//8, channels, 1, bias =False)
+        self.conv_w = nn.Conv2d(channels//8, channels, 1, bias =False)
+
+    def forward(self, x):
+        identity = x
+
+        b, c, h, w = x.size()
+        x_h = self.pool_h(x)                        # (b,c,h,1)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)    # (b,c,w,1)
+        y = torch.cat([x_h, x_w], dim=2)            # (b,c,h+w,1)
+        y = self.convdownsize(y)
+        y = self.bn(y)
+        y = self.act(y)
+
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        a_h = self.conv_h(x_h).sigmoid()
+        a_w = self.conv_w(x_w).sigmoid()
+
+        out = identity * a_w * a_h
+        return out
+
+
+
+
+
+
+
+ 

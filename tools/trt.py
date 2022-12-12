@@ -9,7 +9,7 @@ from loguru import logger
 
 import tensorrt as trt
 import torch
-from torch2trt import torch2trt
+import torch2trt
 
 from yolox.exp import get_exp
 

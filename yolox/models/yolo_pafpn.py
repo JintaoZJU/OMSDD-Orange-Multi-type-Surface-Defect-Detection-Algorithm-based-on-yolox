@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from .darknet import CSPDarknet
-from .network_blocks import BaseConv, CSPLayer, DWConv
+from .network_blocks import BaseConv, CSPLayer, DWConv, SE, CBAM, CAM
 
 
 class YOLOPAFPN(nn.Module):
@@ -31,10 +31,10 @@ class YOLOPAFPN(nn.Module):
 
         self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
         self.lateral_conv0 = BaseConv(
-            int(in_channels[2] * width), int(in_channels[1] * width), 1, 1, act=act
+            int(in_channels[2] * width), int(in_channels[1] * width), 1, 1, act=act #dark5 1*1conv 降维 cin=1024 cout=512
         )
         self.C3_p4 = CSPLayer(
-            int(2 * in_channels[1] * width),
+            int(2 * in_channels[1] * width), #dark4 & lateral_conv0 concat cin=1024 cout=512
             int(in_channels[1] * width),
             round(3 * depth),
             False,
@@ -46,7 +46,7 @@ class YOLOPAFPN(nn.Module):
             int(in_channels[1] * width), int(in_channels[0] * width), 1, 1, act=act
         )
         self.C3_p3 = CSPLayer(
-            int(2 * in_channels[0] * width),
+            int(2 * in_channels[0] * width), #dark3 & 上一个top-down特征图 concat
             int(in_channels[0] * width),
             round(3 * depth),
             False,
@@ -80,6 +80,25 @@ class YOLOPAFPN(nn.Module):
             act=act,
         )
 
+        ###### 实例化Attention对象 ######        
+        '''in_features=("dark3", "dark4", "dark5")
+           in_channels=[256, 512, 1024]'''
+        ##### SE ######  
+        self.se2 = SE(int(in_channels[2]*width)) #dark5+SE C=1024
+        self.se1 = SE(int(in_channels[1]*width)) #dark4+SE C=512
+        self.se0 = SE(int(in_channels[0]*width)) #dark3+SE C=256
+
+        ##### CBAM ######
+        self.CBAM2 = CBAM(int(in_channels[2]*width)) #dark5+CBAM C=1024
+        self.CBAM1 = CBAM(int(in_channels[1]*width)) #dark4+CBAM C=512
+        self.CBAM0 = CBAM(int(in_channels[0]*width)) #dark3+CBAM C=256
+
+        ###### CAM ######
+        self.CAM2 = CAM(int(in_channels[2]*width)) #dark5+CAM C=1024
+        self.CAM1 = CAM(int(in_channels[1]*width)) #dark4+CAM C=512
+        self.CAM0 = CAM(int(in_channels[0]*width)) #dark3+CAM C=256
+        ################################################################
+
     def forward(self, input):
         """
         Args:
@@ -89,10 +108,28 @@ class YOLOPAFPN(nn.Module):
             Tuple[Tensor]: FPN feature.
         """
 
-        #  backbone
+        #  backbone x2, x1, x0 --> 256 512 1024
         out_features = self.backbone(input)
         features = [out_features[f] for f in self.in_features]
         [x2, x1, x0] = features
+
+        ################# 接入Attention 开始#################
+        ###### SE #####
+        # x2 = self.se0(x2)
+        # x1 = self.se1(x1)
+        # x0 = self.se2(x0)
+
+        ###### CBAM #####
+        # x2 = self.CBAM0(x2)
+        # x1 = self.CBAM1(x1)
+        # x0 = self.CBAM2(x0)
+        
+        ###### CAM #####
+        # x2 = self.CAM0(x2)
+        # x1 = self.CAM1(x1)
+        # x0 = self.CAM2(x0)
+
+        ################# 接入Attention 结束 #################
 
         fpn_out0 = self.lateral_conv0(x0)  # 1024->512/32
         f_out0 = self.upsample(fpn_out0)  # 512/16
@@ -111,6 +148,77 @@ class YOLOPAFPN(nn.Module):
         p_out0 = self.bu_conv1(pan_out1)  # 512->512/32
         p_out0 = torch.cat([p_out0, fpn_out0], 1)  # 512->1024/32
         pan_out0 = self.C3_n4(p_out0)  # 1024->1024/32
+
+                      #  backbone x2, x1, x0 --> 256 512 1024
+                      #################  Bi-FPN 开始 n=2 #################
+         #################  增加 x2, x1, x0 到pan_out的shortcut 并重复模块一次 
+        x2 = x2 + pan_out2
+        x1 = x1 + pan_out1
+        x0 = x0 + pan_out0
+
+        fpn_out0 = self.lateral_conv0(x0)  # 1024->512/32
+        f_out0 = self.upsample(fpn_out0)  # 512/16
+        f_out0 = torch.cat([f_out0, x1], 1)  # 512->1024/16
+        f_out0 = self.C3_p4(f_out0)  # 1024->512/16
+
+        fpn_out1 = self.reduce_conv1(f_out0)  # 512->256/16
+        f_out1 = self.upsample(fpn_out1)  # 256/8
+        f_out1 = torch.cat([f_out1, x2], 1)  # 256->512/8
+        pan_out2 = self.C3_p3(f_out1)  # 512->256/8
+
+        p_out1 = self.bu_conv2(pan_out2)  # 256->256/16
+        p_out1 = torch.cat([p_out1, fpn_out1], 1)  # 256->512/16
+        pan_out1 = self.C3_n3(p_out1)  # 512->512/16
+
+        p_out0 = self.bu_conv1(pan_out1)  # 512->512/32
+        p_out0 = torch.cat([p_out0, fpn_out0], 1)  # 512->1024/32
+        pan_out0 = self.C3_n4(p_out0)  # 1024->1024/32
+
+        #################  增加 x2, x1, x0 到pan_out的shortcut 并重复模块一次 
+        x2 = x2 + pan_out2
+        x1 = x1 + pan_out1
+        x0 = x0 + pan_out0
+
+        fpn_out0 = self.lateral_conv0(x0)  # 1024->512/32
+        f_out0 = self.upsample(fpn_out0)  # 512/16
+        f_out0 = torch.cat([f_out0, x1], 1)  # 512->1024/16
+        f_out0 = self.C3_p4(f_out0)  # 1024->512/16
+
+        fpn_out1 = self.reduce_conv1(f_out0)  # 512->256/16
+        f_out1 = self.upsample(fpn_out1)  # 256/8
+        f_out1 = torch.cat([f_out1, x2], 1)  # 256->512/8
+        pan_out2 = self.C3_p3(f_out1)  # 512->256/8
+
+        p_out1 = self.bu_conv2(pan_out2)  # 256->256/16
+        p_out1 = torch.cat([p_out1, fpn_out1], 1)  # 256->512/16
+        pan_out1 = self.C3_n3(p_out1)  # 512->512/16
+
+        p_out0 = self.bu_conv1(pan_out1)  # 512->512/32
+        p_out0 = torch.cat([p_out0, fpn_out0], 1)  # 512->1024/32
+        pan_out0 = self.C3_n4(p_out0)  # 1024->1024/32
+
+        pan_out2 = x2 + pan_out2
+        pan_out1 = x1 + pan_out1
+        pan_out0 = x0 + pan_out0
+                #################  Bi-FPN 结束  #################
+
+                ################# 后接入Attention #################
+        ###### SE #####
+        # pan_out2 = self.se0(pan_out2)
+        # pan_out1 = self.se1(pan_out1)
+        # pan_out0 = self.se2(pan_out0)
+
+        ###### CBAM #####
+        # pan_out2 = self.CBAM0(pan_out2)
+        # pan_out1 = self.CBAM1(pan_out1)
+        # pan_out0 = self.CBAM2(pan_out0)
+        
+        ###### CAM #####
+        # pan_out2 = self.CAM0(pan_out2)
+        # pan_out1 = self.CAM1(pan_out1)
+        # pan_out0 = self.CAM2(pan_out0)
+
+                ################# 接入Attention  #################
 
         outputs = (pan_out2, pan_out1, pan_out0)
         return outputs

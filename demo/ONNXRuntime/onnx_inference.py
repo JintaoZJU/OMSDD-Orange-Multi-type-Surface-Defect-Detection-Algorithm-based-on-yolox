@@ -70,10 +70,13 @@ if __name__ == '__main__':
 
     ort_inputs = {session.get_inputs()[0].name: img[None, :, :, :]}
     output = session.run(None, ort_inputs)
+
     predictions = demo_postprocess(output[0], input_shape, p6=args.with_p6)[0]
+
 
     boxes = predictions[:, :4]
     scores = predictions[:, 4:5] * predictions[:, 5:]
+
 
     boxes_xyxy = np.ones_like(boxes)
     boxes_xyxy[:, 0] = boxes[:, 0] - boxes[:, 2]/2.

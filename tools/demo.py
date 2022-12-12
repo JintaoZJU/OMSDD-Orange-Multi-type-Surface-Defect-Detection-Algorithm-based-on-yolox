@@ -6,6 +6,7 @@ import argparse
 import os
 import time
 from loguru import logger
+import sys
 
 import cv2
 
@@ -166,6 +167,7 @@ class Predictor(object):
         return outputs, img_info
 
     def visual(self, output, img_info, cls_conf=0.35):
+        
         ratio = img_info["ratio"]
         img = img_info["raw_img"]
         if output is None:
@@ -178,13 +180,17 @@ class Predictor(object):
         bboxes /= ratio
 
         cls = output[:, 6]
+
         scores = output[:, 4] * output[:, 5]
 
         vis_res = vis(img, bboxes, scores, cls, cls_conf, self.cls_names)
+
+
         return vis_res
 
 
 def image_demo(predictor, vis_folder, path, current_time, save_result):
+    data = open("YOLOX_outputs/confusion_matrix_data.txt", 'w', encoding = "utf-8")
     if os.path.isdir(path):
         files = get_image_list(path)
     else:
@@ -193,6 +199,8 @@ def image_demo(predictor, vis_folder, path, current_time, save_result):
     for image_name in files:
         outputs, img_info = predictor.inference(image_name)
         result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
+        # 存输出数据
+        # print(outputs[0][:, 6], file = data)
         if save_result:
             save_folder = os.path.join(
                 vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
@@ -207,6 +215,7 @@ def image_demo(predictor, vis_folder, path, current_time, save_result):
 
 
 def imageflow_demo(predictor, vis_folder, current_time, args):
+
     cap = cv2.VideoCapture(args.path if args.demo == "video" else args.camid)
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
@@ -311,6 +320,9 @@ def main(exp, args):
         image_demo(predictor, vis_folder, args.path, current_time, args.save_result)
     elif args.demo == "video" or args.demo == "webcam":
         imageflow_demo(predictor, vis_folder, current_time, args)
+
+
+    
 
 
 if __name__ == "__main__":

@@ -22,11 +22,11 @@ class Exp(MyExp):
         self.enable_mixup = False
 
         # Define yourself dataset path
-        self.data_dir = "datasets/coco128"
+        self.data_dir = "datasets/areca_yolox_20220819_cocodata/"
         self.train_ann = "instances_train2017.json"
         self.val_ann = "instances_val2017.json"
 
-        self.num_classes = 71
+        self.num_classes = 1
 
     def get_model(self, sublinear=False):
 
